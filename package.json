@@ -1,0 +1,14 @@
+{
+  "name": "con2-mev-backend",
+  "version": "3.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "ethers": "^5.7.2",
+    "node-fetch": "^2.7.0"
+  }
+}
